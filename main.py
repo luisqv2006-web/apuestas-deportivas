@@ -8,18 +8,33 @@ import schedule
 import time
 from datetime import datetime
 import pytz
+from flask import Flask
+from threading import Thread
 
-# --- CONFIGURACIÓN ---
+# --- 1. SERVIDOR FALSO PARA RENDER (KEEP ALIVE) ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "🤖 El Bot de Liga MX está VIVO y trabajando."
+
+def run_web_server():
+    # Render asigna un puerto dinámico, lo leemos aquí
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run_web_server)
+    t.start()
+
+# --- 2. CONFIGURACIÓN DEL BOT ---
 TOKEN = os.getenv('TELEGRAM_TOKEN')
-CHAT_ID = os.getenv('TELEGRAM_CHAT_ID') # ¡OJO! Necesitas tu ID de usuario
+CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 bot = telebot.TeleBot(TOKEN)
 
-# URL de datos históricos para el análisis
 URL_DATOS_HISTORICOS = "https://www.football-data.co.uk/new/MEX.csv"
-# URL para ver qué partidos hay HOY (Calendario ESPN MX)
 URL_CALENDARIO = "https://www.espn.com.mx/futbol/calendario/_/liga/mex.1"
 
-# Mapa de equipos (Tus correcciones manuales para que coincidan las fuentes)
 EQUIPOS_MAPA = {
     "america": "Club America", "club america": "Club America",
     "guadalajara": "Guadalajara", "chivas": "Guadalajara",
@@ -36,7 +51,7 @@ EQUIPOS_MAPA = {
     "tijuana": "Tijuana", "xolos": "Tijuana"
 }
 
-# --- 1. MOTOR DE ANÁLISIS (EL CEREBRO) ---
+# --- 3. LÓGICA DE ANÁLISIS ---
 def obtener_datos_historicos():
     try:
         df = pd.read_csv(URL_DATOS_HISTORICOS, on_bad_lines='skip')
@@ -46,31 +61,22 @@ def obtener_datos_historicos():
         return None
 
 def normalizar_nombre(nombre_raw, lista_objetivo):
-    # Limpieza básica
     nombre_clean = str(nombre_raw).lower().replace("fc", "").strip()
-    
-    # 1. Búsqueda directa en diccionario
     for k, v in EQUIPOS_MAPA.items():
         if k in nombre_clean:
-            # Validar que el valor del mapa exista en la lista objetivo (CSV)
             matches = get_close_matches(v, lista_objetivo, n=1, cutoff=0.6)
             if matches: return matches[0]
-
-    # 2. Búsqueda difusa (Fuzzy matching)
     matches = get_close_matches(nombre_clean, lista_objetivo, n=1, cutoff=0.4)
     if matches: return matches[0]
     return None
 
 def analizar_partido(local_raw, visita_raw, df_hist):
     equipos_csv = pd.concat([df_hist['Home'], df_hist['Away']]).unique()
-    
     local = normalizar_nombre(local_raw, equipos_csv)
     visita = normalizar_nombre(visita_raw, equipos_csv)
     
-    if not local or not visita:
-        return None # No se pudieron identificar los equipos
+    if not local or not visita: return None
 
-    # Lógica de Poisson Ponderada
     def get_stats(team, is_home):
         if is_home:
             partidos = df_hist[df_hist['Home'] == team].head(5)
@@ -102,99 +108,78 @@ def analizar_partido(local_raw, visita_raw, df_hist):
         "local": local, "visita": visita,
         "prob_local": prob_l * 100,
         "prob_empate": prob_e * 100,
-        "prob_visita": prob_v * 100,
-        "xg_local": xg_l, "xg_visita": xg_v
+        "prob_visita": prob_v * 100
     }
 
-# --- 2. BUSCADOR DE PARTIDOS (EL OJO) ---
 def buscar_partidos_hoy():
     print("🔍 Buscando partidos en ESPN...")
     try:
-        # Pandas lee las tablas de la web de ESPN automáticamente
         tablas = pd.read_html(URL_CALENDARIO)
-        
         partidos_hoy = []
-        fecha_hoy = datetime.now(pytz.timezone('America/Mexico_City')).strftime("%d de %b") # Formato ESPN aprox
-        
-        # Como ESPN cambia formatos, una estrategia simple es traer TODO lo que encuentre
-        # y filtrar lo que parezca un partido de hoy.
-        # NOTA: Para este ejemplo simple, asumiremos que si la tabla tiene datos, son los proximos partidos.
-        
         for tabla in tablas:
-            # Intentamos limpiar la tabla
             if len(tabla.columns) >= 2:
                 for index, row in tabla.iterrows():
-                    # Estructura usual ESPN: Local, Resultado/Hora, Visitante
                     try:
                         equipo1 = row[0]
                         equipo2 = row[1] 
-                        # Validación muy básica de texto
                         if isinstance(equipo1, str) and isinstance(equipo2, str):
                             if len(equipo1) > 3 and len(equipo2) > 3:
                                 partidos_hoy.append((equipo1, equipo2))
-                    except:
-                        continue
-                        
+                    except: continue
         return partidos_hoy
     except Exception as e:
-        print(f"Error scraping calendario: {e}")
+        print(f"Error scraping: {e}")
         return []
 
-# --- 3. TAREA AUTOMATICA ---
 def tarea_diaria():
     print("⏰ Ejecutando tarea diaria...")
     partidos = buscar_partidos_hoy()
-    
     if not partidos:
-        print("No encontré partidos claros para hoy.")
+        print("No encontré partidos claros hoy.")
         return
 
     df_hist = obtener_datos_historicos()
     if df_hist is None: return
 
-    reporte = "🤖 **REPORTE DIARIO LIGA MX** 🤖\n\n"
+    reporte = "🤖 **REPORTE LIGA MX** 🤖\n\n"
     hay_predicciones = False
 
     for p in partidos:
         local_raw, visita_raw = p
-        # Limpieza extra de nombres de ESPN que suelen venir con hora
-        # Ejemplo: "América 21:00" -> quitamos la hora si podemos, o confiamos en el normalizador
-        
         analisis = analizar_partido(local_raw, visita_raw, df_hist)
-        
         if analisis:
             hay_predicciones = True
             p_l = analisis['prob_local']
             p_v = analisis['prob_visita']
-            
             icono = "⚖️"
             if p_l > 55: icono = "🔥 LOCAL"
             elif p_v > 55: icono = "🔥 VISITA"
             
             reporte += (
                 f"⚽ **{analisis['local']} vs {analisis['visita']}**\n"
-                f"Probabilidades: {p_l:.1f}% - {analisis['prob_empate']:.1f}% - {p_v:.1f}%\n"
+                f"L: {p_l:.1f}% | E: {analisis['prob_empate']:.1f}% | V: {p_v:.1f}%\n"
                 f"Predicción: {icono}\n"
-                f"-----------------------------\n"
+                f"---\n"
             )
 
     if hay_predicciones and CHAT_ID:
-        bot.send_message(CHAT_ID, reporte, parse_mode="Markdown")
-        print("Mensaje enviado a Telegram.")
-    else:
-        print("Se encontraron partidos pero no se pudieron emparejar con la base de datos histórica.")
+        try:
+            bot.send_message(CHAT_ID, reporte, parse_mode="Markdown")
+            print("Mensaje enviado.")
+        except Exception as e:
+            print(f"Error enviando mensaje: {e}")
 
-# --- 4. CONFIGURACIÓN DEL SERVIDOR (RENDER) ---
-# Programar la tarea todos los días a las 10:00 AM hora México
+# --- 4. EJECUCIÓN PRINCIPAL ---
+
+# Arrancamos el servidor web falso en un hilo separado
+keep_alive()
+
+# Programamos la tarea (Ajusta la hora según necesites)
 schedule.every().day.at("10:00").do(tarea_diaria)
+# schedule.every(10).minutes.do(tarea_diaria) # Descomenta esto para probar rápido (cada 10 mins)
 
-# Endpoint falso para que Render sepa que estamos vivos (opcional si usas worker)
-# Pero como usaremos script simple:
-print("🤖 Bot iniciado. Esperando hora programada...")
-
-# Si quieres probarlo INMEDIATAMENTE al subir, descomenta la siguiente línea:
-# tarea_diaria()
+print("🤖 Bot iniciado con Servidor Web Falso. Esperando...")
 
 while True:
     schedule.run_pending()
-    time.sleep(60) # Revisar cada minuto
+    time.sleep(60)
