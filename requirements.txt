@@ -1,0 +1,9 @@
+pandas
+numpy
+scipy
+pyTelegramBotAPI
+schedule
+lxml
+html5lib
+requests
+beautifulsoup4
