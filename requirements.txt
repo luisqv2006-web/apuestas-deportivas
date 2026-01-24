@@ -10,3 +10,4 @@ beautifulsoup4
 flask
 pybaseball
 scikit-learn
+nba_api
